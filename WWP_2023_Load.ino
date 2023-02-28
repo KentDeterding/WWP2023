@@ -19,10 +19,10 @@ PA12 myServo(&Serial1, Linear_Actuator_Enable, 1);
 //          (&Serial, enable_pin,  Tx Level)
 
 //Adjustable Variables
-uint16_t regulate_RPM_Setpoint = 4000;
-uint16_t regulate_Power_Setpoint = 25000;//(mW)
-float optimal_Theta = 30;
-float cutin_Theta = 43;
+uint16_t regulate_RPM_Setpoint = 5000;
+uint16_t regulate_Power_Setpoint = 35000;//(mW)
+float optimal_Theta = 0;
+float cutin_Theta = 10;
 float brake_Theta = 95;
 float DAC_Voltage_Cutin = 0;
 
@@ -55,20 +55,23 @@ float DAC_Voltage;
 float DAC_Voltage_Previous;
 float DAC_Perturbation = 10;
 float DAC_Voltage_Maximum = 3300;//(mV)
+float Effective_Load_Resistance = 4;
+float VIratio;
+
 
 //State Machine Variables
 enum States {StartUp, Optimize, Regulate, EStop_Safety, Discontinuity_Safety, Safety_Restart};
-States State = Optimize;
+States State = StartUp;
 enum PCC_Disconnect_States {Wait, RelayOn, Reconnection};
 PCC_Disconnect_States PCC_Disconnect_State = Wait;
 
 //Timer Intervals
 unsigned Fast_Interval = 10;
-unsigned Medium_Interval = 250;
-unsigned Slow_Interval = 500;
-unsigned Safety_Restart_Interval = 5000;
-unsigned Pitch_Transient_Interval = 100;
-unsigned RPM_Timeout_Interval = 500;
+unsigned Medium_Interval = 50;
+unsigned Slow_Interval = 100;
+unsigned Safety_Restart_Interval = 2000;
+unsigned Pitch_Transient_Interval = 800;
+unsigned RPM_Timeout_Interval = 200;
 
 //Timers
 unsigned long Timer_Fast;
@@ -82,9 +85,7 @@ bool load_Optimize_Enable = false;
 bool E_Stop = false;
 bool PCC_Disconnected = false;
 bool PCC_Relay = false;
-bool state_Machine_Enable = false;
-
-
+bool state_Machine_Enable = true;
 
 
 void setup() {
@@ -104,6 +105,8 @@ void setup() {
   set_Theta();
   delay (4000);
   PCC_Relay = false;
+  digitalWrite(PCC_Relay_Pin, PCC_Relay);
+  delay (4000);
   DAC_Voltage = DAC_Voltage_Cutin;
 
   initialize_Timers();
@@ -116,12 +119,12 @@ void loop() {
     read_EStop();
     //read_PCC_Disconnect();
     manage_State();
-    read_RPM();
   }
 
   if (millis() - Timer_Medium >= Medium_Interval)
   {
     Timer_Medium = millis();
+    read_RPM();
   }
 
   if (millis() - Timer_Slow >= Slow_Interval)
@@ -129,7 +132,8 @@ void loop() {
     Timer_Slow = millis();
     read_INA260();
     read_Linear_Actuator_Position();
-    optimize_Load();
+    VIratio_optimize_load();
+    //optimize_Load();
     set_Load();
     PC_Comms ();
   }
@@ -140,8 +144,7 @@ void manage_State() {
     switch (State)
     {
       case StartUp:
-        if (RPM_Filtered > 500)
-        {
+        if (RPM_Filtered > 500) {
           State = Optimize;
           load_Optimize_Enable = true;
           theta = optimal_Theta;
@@ -174,7 +177,7 @@ void manage_State() {
         {
           State = Discontinuity_Safety;
         }
-        if (RPM_Filtered < 0.95 * regulate_RPM_Setpoint)
+        if (RPM_Filtered < 0.85 * regulate_RPM_Setpoint)
         {
           State = Optimize;
           theta = optimal_Theta;
@@ -184,35 +187,40 @@ void manage_State() {
 
       case EStop_Safety:
         PCC_Relay = true;
+        digitalWrite(PCC_Relay_Pin, PCC_Relay);
         theta = brake_Theta;
         set_Theta();
         load_Optimize_Enable = false;
         if (!E_Stop)
         {
           State = Safety_Restart;
+          Timer_Safety_Restart = millis();
         }
         break;
 
       case Discontinuity_Safety:
         PCC_Relay = true;
+        digitalWrite(PCC_Relay_Pin, PCC_Relay);
         theta = brake_Theta;
         set_Theta();
         load_Optimize_Enable = false;
         if (!PCC_Disconnected)
         {
           State = Safety_Restart;
+          Timer_Safety_Restart = millis();
         }
         break;
 
       case Safety_Restart:
-        theta = cutin_Theta;
+        theta = optimal_Theta;
         set_Theta();
         if (millis() - Timer_Safety_Restart >= Safety_Restart_Interval)
         {
-          Timer_Safety_Restart = millis();
+          //Timer_Safety_Restart = millis();
           load_Optimize_Enable = true;
           PCC_Relay = false;
-          State = Optimize;
+          digitalWrite(PCC_Relay_Pin, PCC_Relay);
+          State = StartUp;
         }
         break;
 
@@ -249,18 +257,19 @@ void read_PCC_Disconnect() {
   switch (PCC_Disconnect_State)
   {
     case Wait:
-      if (digitalRead(PCC_Disconnect_Pin) && ina260.readBusVoltage() < 500) {
+      if (!digitalRead(PCC_Disconnect_Pin) && (ina260.readBusVoltage() < 500)) {
         PCC_Disconnected = true;
         PCC_Disconnect_State = RelayOn;
+        delay (4000); //TO BE REMOVED
       }
       break;
     case RelayOn:
-      if (!digitalRead(PCC_Disconnect_Pin) && ina260.readBusVoltage() > 500) {
+      if (digitalRead(PCC_Disconnect_Pin) && ina260.readBusVoltage() > 500) {
         PCC_Disconnect_State = Reconnection;
       }
       break;
     case Reconnection:
-      if (digitalRead(PCC_Disconnect_Pin) && ina260.readBusVoltage() > 500) {
+      if (!digitalRead(PCC_Disconnect_Pin) && ina260.readBusVoltage() > 500) {
         PCC_Disconnected = false;
         PCC_Disconnect_State = Wait;
       }
@@ -319,35 +328,43 @@ void set_Theta()
 
 void read_RPM() {
   attachInterrupt(digitalPinToInterrupt(RPM_Pin), RPM_Interupt, RISING);    //run ISR on rising edge
-//  if (millis() - Timer_RPM_Timeout >= RPM_Timeout_Interval)
-//  {
-//    Timer_RPM_Timeout = millis();
-//    Saved_RPM [0] = 0;
-//    Saved_RPM [1] = 0;
-//    Saved_RPM [2] = 0;
-//    Saved_RPM [3] = 0;
-//    Saved_RPM [4] = 0;
-//    Saved_RPM [5] = 0;
-//    Saved_RPM [6] = 0;
-//    Saved_RPM [7] = 0;
-//    Saved_RPM [8] = 0;
-//    Saved_RPM [9] = 0;
-//    RPM_Filtered = 0;
-//  }
+    if (millis() - Timer_RPM_Timeout >= RPM_Timeout_Interval)
+    {
+      FirstRead_RPM = true;
+      Timer_RPM_Timeout = millis();
+      Saved_RPM [0] = 0;
+      Saved_RPM [1] = 0;
+      Saved_RPM [2] = 0;
+      Saved_RPM [3] = 0;
+      Saved_RPM [4] = 0;
+      Saved_RPM [5] = 0;
+      Saved_RPM [6] = 0;
+      Saved_RPM [7] = 0;
+      Saved_RPM [8] = 0;
+      Saved_RPM [9] = 0;
+      RPM_Filtered = 0;
+      RPMSum = 0;
+    }
 }
 
 void PC_Comms () {
   //---------------------------------------------------------------------------------------
   if (Serial)
   {
-    Serial.println("--------------------------------------");
-    Serial.print("(p) PCC Relay: ");
+    Serial.println("----------------------------------------------------------");
+    Serial.println();
+    Serial.println("                   WILDCAT WIND POWER");
+    Serial.println("                           2023");
+    Serial.println();
+    Serial.println("----------------------------------------------------------");
+    Serial.println();
+    Serial.print("(p) PCC Relay:                          ");
     Serial.println(PCC_Relay ? "On" : "Off");
 
-    Serial.print("(s) State Machine: ");
+    Serial.print("(s) State Machine:                      ");
     Serial.println(state_Machine_Enable ? "Enabled" : "Disabled");
 
-    Serial.print("State: ");
+    Serial.print("State:                                  ");
     switch (State)
     {
       case StartUp:
@@ -379,47 +396,58 @@ void PC_Comms () {
         break;
     }
 
-    Serial.print("Emergency Switch: ");
+    Serial.print("Emergency Switch:                       ");
     Serial.println(E_Stop ? "On" : "Off");
 
 
-    Serial.print("Turbine Side Voltage: ");
-    Serial.println(digitalRead(PCC_Disconnect_Pin) ? "High" : "Low");
+    Serial.print("Turbine Side Voltage:                   ");
+    Serial.println(digitalRead(PCC_Disconnect_Pin) ? "Low" : "High");
 
-    Serial.print("Load Discontinuity: ");
+    Serial.print("Load Discontinuity:                     ");
     Serial.println(PCC_Disconnected ? "True" : "False");
+    Serial.println();
 
-    Serial.print("(t) Theta (0° - 95°): ");
+    Serial.print("(t) Theta (0° - 95°):                   ");
     Serial.print(theta);
     Serial.println("°");
 
-    Serial.print("Real Theta (From Linear Actuator): ");
+    Serial.print("Real Theta (From Linear Actuator):      ");
     Serial.print(actual_Theta);
     Serial.println("°");
 
-    Serial.print("(o) Load Optimization: ");
+    Serial.print("(o) Load Optimization:                  ");
     Serial.println(load_Optimize_Enable ? "Enabled" : "Disabled");
 
-    Serial.print("(v) Load DAC Voltage ( 0mV - 3300mV ): ");
+    Serial.print("(r) Effective Load Resistance:          ");
+    Serial.print(Effective_Load_Resistance);
+    Serial.println(" Ω");
+
+    Serial.print("(v) Load DAC Voltage ( 0mV - 3300mV ):  ");
     Serial.print(DAC_Voltage);
     Serial.println(" mV");
 
-    Serial.print("Load Voltage: ");
+    Serial.println();
+
+    Serial.print("Load Voltage:                           ");
     Serial.print(L_Voltage);
     Serial.println(" mV");
 
-    Serial.print("Load Current: ");
+    Serial.print("Load Current:                           ");
     Serial.print(L_Current);
     Serial.println(" mA");
 
-    Serial.print("Load Power: ");
+    Serial.print("Load Power:                             ");
     Serial.print(L_Power);
     Serial.println(" mW");
 
-    Serial.print("RPM: ");
+    Serial.print("RPM:                                    ");
     Serial.println(RPM_Filtered);
+    Serial.println("----------------------------------------------------------");
 
-    Serial.println("--------------------------------------");
+    Serial.println();
+    Serial.println();
+    Serial.println();
+    Serial.println();
     Serial.println();
   }
   if (Serial.available() > 0)
@@ -450,9 +478,33 @@ void PC_Comms () {
         DAC_Voltage = Serial.parseFloat();
         break;
 
+      case 'r':
+        Effective_Load_Resistance = Serial.parseFloat();
+        break;
+
       default:
         Serial.println("Command not recognized");
         break;
+    }
+  }
+}
+
+void VIratio_optimize_load() {
+  VIratio = 1 / Effective_Load_Resistance;
+  if (load_Optimize_Enable) {
+    if (L_Power > regulate_Power_Setpoint) {
+      DAC_Voltage_Previous = DAC_Voltage;                          //Check if power regulation is needed
+      DAC_Voltage = DAC_Voltage - DAC_Perturbation;          //Regulate power
+    }
+    else {
+      if (L_Current - (VIratio * L_Voltage) < 0) {           //if the expression is negative, then load voltage is too high and current can be increased
+        DAC_Voltage_Previous = DAC_Voltage;
+        DAC_Voltage = DAC_Voltage + DAC_Perturbation;
+      }
+      else if (L_Current - (VIratio * L_Voltage) > 0) {        //if the expression is positive, then load current is too high and must be reduced
+        DAC_Voltage_Previous = DAC_Voltage;
+        DAC_Voltage = DAC_Voltage - DAC_Perturbation;
+      }
     }
   }
 }
