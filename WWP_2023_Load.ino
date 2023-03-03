@@ -20,10 +20,10 @@ PA12 myServo(&Serial1, Linear_Actuator_Enable, 1);
 //          (&Serial, enable_pin,  Tx Level)
 
 //Adjustable Variables
-uint16_t regulate_RPM_Setpoint = 5000;
-uint16_t regulate_Power_Setpoint = 35000;//(mW)
+uint16_t regulate_RPM_Setpoint = 3000;
+uint16_t regulate_Power_Setpoint = 25000;//(mW)
 float optimal_Theta = 7;
-float cutin_Theta = 15;
+float cutin_Theta = 20;
 float brake_Theta = 95;
 float DAC_Voltage_Cutin = 0;
 
@@ -145,7 +145,7 @@ void manage_State() {
     switch (State)
     {
       case StartUp:
-        if (RPM_Filtered > 500) {
+        if (RPM_Filtered > 700) {
           State = Optimize;
           load_Resistance_Tracking_Enable = true;
           theta = optimal_Theta;
