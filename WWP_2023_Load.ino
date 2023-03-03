@@ -1,9 +1,9 @@
-#include <Wire.h>               //Include library for UART communication
-#include <Adafruit_MCP4725.h>   //Include DAC library
-#include <Adafruit_INA260.h>    //Include power sensor library
+#include <Wire.h>                                           //Include library for UART communication
+#include <Adafruit_MCP4725.h>                               //Include DAC library
+#include <Adafruit_INA260.h>                                //Include power sensor library
 #include <PA12.h>
 Adafruit_INA260 ina260 = Adafruit_INA260();
-Adafruit_MCP4725 dac;           //Initailize DAC
+Adafruit_MCP4725 dac;                                       //Initailize DAC
 
 //Pin Declarations
 #define Linear_Actuator_Enable 16
@@ -12,7 +12,7 @@ Adafruit_MCP4725 dac;           //Initailize DAC
 #define RPM_Pin 30
 #define PCC_Relay_Pin 33
 #define EStop_Pin 11
-#define PCC_Disconnect_Pin 29
+#define PCC_Disconnect_Pin 29                               //Pin reads low for a high voltage on the turbine side (DOES NOT DIRECTLY IMPLY PCC IS DISCONNECTED)
 
 //Linear Actuators
 #define ID_NUM 0
@@ -20,25 +20,25 @@ PA12 myServo(&Serial1, Linear_Actuator_Enable, 1);
 //          (&Serial, enable_pin,  Tx Level)
 
 //Adjustable Variables
-uint16_t regulate_RPM_Setpoint = 3000;
-uint16_t regulate_Power_Setpoint = 25000;//(mW)
-float optimal_Theta = 7;
-float cutin_Theta = 20;
-float brake_Theta = 95;
-float DAC_Voltage_Cutin = 0;
+uint16_t regulate_RPM_Setpoint = 3000;                      //Maximum RPM value
+uint16_t regulate_Power_Setpoint = 25000;                   //Maximum Power Value(mW)
+float optimal_Theta = 7;                                    //Theta value for the entirety of the power curve task
+float cutin_Theta = 20;                                     //Theta value for startup
+float brake_Theta = 95;                                     //Theta value for safety tasks
+float DAC_Voltage_Cutin = 0;                                //DAC voltage for startup (mV)
 
 //Active Pitch Variables
-uint16_t theta_Position;
-float theta;
-float actual_Theta;
+uint16_t theta_Position;                                    //Integer value sent to linear actuator (DO NOT WRITE TO)
+float theta;                                                //Angle of blades (WRITE TO THIS TO CHANGE PITCH) (0° - 95°)
+float actual_Theta;                                         //Angle of blades recieved from linear actuator
 
 //INA260 Reading Variables
-uint16_t L_Power = 0;   //Load Power (mW)
-uint16_t L_Voltage = 0; //Load Voltage (mV)
-uint16_t L_Current = 0; //Load Current (mA)
+uint16_t L_Power = 0;                                       //Load Power (mW)
+uint16_t L_Voltage = 0;                                     //Load Voltage (mV)
+uint16_t L_Current = 0;                                     //Load Current (mA)
 
 //RPM Reading Variables
-volatile uint16_t RPM_Filtered;
+volatile uint16_t RPM_Filtered;                             //RPM value after filtering has been done (USE THIS VALUE FOR CALCULATIONS)
 volatile uint16_t RPM_Raw;
 volatile uint16_t RPM_Raw_Previous;
 volatile unsigned long TempStore_RPM = 0;
@@ -50,29 +50,27 @@ volatile int i = 0;
 volatile int F = 0;
 
 //Load Variables
-float DAC_Voltage;
-float DAC_Voltage_Previous;
-float DAC_Perturbation = 10;
-float DAC_Voltage_Maximum = 3300;//(mV)
-float Effective_Load_Resistance = 4;
-float VIratio;
+float DAC_Voltage;                                          //Current Load DAC Voltage
+float DAC_Voltage_Previous;                                 //Previous Load DAC Voltage
+float DAC_Perturbation = 10;                                //Step size of DAC voltage adjustment during resistance tracking
+float DAC_Voltage_Maximum = 3300;                           //Maximum voltage output of load DAC (mV)
+float Effective_Load_Resistance = 4;                        //Resistance to which tracking aims to achieve
+float VIratio;                                              //Current divided by voltage
 
 
 //State Machine Variables
-enum States {StartUp, Optimize, Regulate, EStop_Safety, Discontinuity_Safety, EStop_Safety_Restart, Discontinuity_Safety_Restart};
+enum States {StartUp, Resistance_Tracking, Regulate, EStop_Safety, Discontinuity_Safety, EStop_Safety_Restart, Discontinuity_Safety_Restart};
 States State = StartUp;
-enum PCC_Disconnect_States {Wait, RelayOn, Reconnection};
-PCC_Disconnect_States PCC_Disconnect_State = Wait;
 
 //Timer Intervals
-unsigned Fast_Interval = 10;
-unsigned Medium_Interval = 50;
-unsigned Slow_Interval = 500;
-unsigned EStop_Safety_Restart_Interval = 2000;
-unsigned Discontinuity_Safety_Restart_Interval = 5000;
-unsigned Pitch_Transient_Interval = 800;
-unsigned RPM_Timeout_Interval = 200;
-unsigned Discontinuity_Power_Down_Interval = 3000;
+unsigned Fast_Interval = 10;                                //Runs at this interval: State Machine, E-Stop Checking, Discontinuity Checking
+unsigned Medium_Interval = 50;                              //Runs at this interval: RPM Reading
+unsigned Slow_Interval = 500;                               //Runs at this interval: Reading INA260, Reading Linear Actuator Position, Resistance Tracking, PC Comms
+unsigned EStop_Safety_Restart_Interval = 2000;              //Time from E-Stop button being returned to normal to entering Resistance Tracking state
+unsigned Discontinuity_Safety_Restart_Interval = 5000;      //Time from PCC being recconected to entering Resistance Tracking state (longer to allow cap charging)
+unsigned Pitch_Transient_Interval = 800;                    //Time between pitch adjustments during RPM regulation
+unsigned RPM_Timeout_Interval = 200;                        //After this amount of time without an RPM reading, RPM is set to zero
+unsigned Discontinuity_Power_Down_Interval = 3000;          //Time interval needed for turbine side caps to discharge
 
 //Timers
 unsigned long Timer_Fast;
@@ -85,58 +83,58 @@ unsigned long Timer_RPM_Timeout;
 unsigned long Timer_Discontinuity_Power_Down;
 
 bool load_Resistance_Tracking_Enable = false;
-bool E_Stop = false;
-bool PCC_Disconnected = false;
-bool PCC_Relay = false;
-bool state_Machine_Enable = true;
+bool E_Stop = false;                                        //True if E-Stop button pressed
+bool PCC_Disconnected = false;                              //True if PCC disconnected
+bool PCC_Relay = false;                                     //If set true, PCC will supply power from load side to turbine side
+bool state_Machine_Enable = true;                           //Set to false if wanting to do manual testing
 
 
 void setup() {
   //Linear Actuator
   myServo.begin(32);
-  myServo.movingSpeed(ID_NUM, 800);
-  Serial.begin(9600);           //Begin serial monitor
-  dac.begin(0x66);              //Initialize DAC
-  ina260.begin();               //Initialize INA 260
+  myServo.movingSpeed(ID_NUM, 800);                         //Set speed of linear actuator movement
+  Serial.begin(9600);                                       //Begin serial monitor
+  dac.begin(0x66);                                          //Initialize DAC
+  ina260.begin();                                           //Initialize INA 260
 
-  initialize_Pins();
+  initialize_Pins();                                        //Initialize all pins used in the program
 
-  PCC_Relay = true;
+  PCC_Relay = true;                                         //Turn on PCC relay to allow blades to pitch to cut-in pitch
   digitalWrite(PCC_Relay_Pin, PCC_Relay);
-  delay (4000);
-  theta = cutin_Theta;
+  delay (4000);                                             //Allow time for turbine side caps to charge
+  theta = cutin_Theta;                                      //Set theta to best pitch for cut-in
   set_Theta();
-  delay (4000);
+  delay (4000);                                             //Allow time for pitching to occur
   PCC_Relay = false;
-  digitalWrite(PCC_Relay_Pin, PCC_Relay);
+  digitalWrite(PCC_Relay_Pin, PCC_Relay);                   //Turn off PCC to allow power to flow through load
   delay (4000);
-  DAC_Voltage = DAC_Voltage_Cutin;
+  DAC_Voltage = DAC_Voltage_Cutin;                          //Set to low load for better cut-in
 
-  initialize_Timers();
+  initialize_Timers();                                      //Set all timers to current millis() value
 }
 
 void loop() {
   if (millis() - Timer_Fast >= Fast_Interval)
   {
     Timer_Fast = millis();
-    read_EStop();
-    manage_State();
+    read_EStop();                                           //Read signal from E-Stop switch
+    manage_State();                                         //Run state machine
   }
 
   if (millis() - Timer_Medium >= Medium_Interval)
   {
     Timer_Medium = millis();
-    read_RPM();
+    read_RPM();                                             //Gather RPM
   }
 
   if (millis() - Timer_Slow >= Slow_Interval)
   {
     Timer_Slow = millis();
-    read_INA260();
-    read_Linear_Actuator_Position();
-    VIratio_optimize_load();
-    set_Load();
-    PC_Comms ();
+    read_INA260();                                          //Gather load power, voltage, and current
+    read_Linear_Actuator_Position();                        //Gather actual linear actuator posistion
+    Resistance_Track_Load();                                //Find DAC voltage setpoint
+    set_Load();                                             //Set DAC voltage
+    PC_Comms ();                                            //Check serial monitor and print to serial monitor
   }
 }
 
@@ -145,15 +143,15 @@ void manage_State() {
     switch (State)
     {
       case StartUp:
-        if (RPM_Filtered > 700) {
-          State = Optimize;
+        if (RPM_Filtered > 700) {                           //Transistion out of start-up once RPM is achieved
+          State = Resistance_Tracking;
           load_Resistance_Tracking_Enable = true;
           theta = optimal_Theta;
           set_Theta();
         }
         break;
 
-      case Optimize:
+      case Resistance_Tracking:
         if (E_Stop)
         {
           State = EStop_Safety;
@@ -182,7 +180,7 @@ void manage_State() {
         }
         if (RPM_Filtered < 0.85 * regulate_RPM_Setpoint)
         {
-          State = Optimize;
+          State = Resistance_Tracking;
           theta = optimal_Theta;
           set_Theta();
         }
@@ -209,11 +207,12 @@ void manage_State() {
           load_Resistance_Tracking_Enable = true;
           PCC_Relay = false;
           digitalWrite(PCC_Relay_Pin, PCC_Relay);
-          State = Optimize;
+          State = Resistance_Tracking;
         }
         break;
 
       case Discontinuity_Safety:
+        PCC_Disconnected = true;
         PCC_Relay = true;
         digitalWrite(PCC_Relay_Pin, PCC_Relay);
         theta = brake_Theta;
@@ -224,6 +223,7 @@ void manage_State() {
           if (!digitalRead(PCC_Disconnect_Pin)) {
             Timer_Discontinuity_Safety_Restart = millis();
             State = Discontinuity_Safety_Restart;
+            PCC_Disconnected = false;
           }
         }
         break;
@@ -236,7 +236,7 @@ void manage_State() {
           load_Resistance_Tracking_Enable = true;
           PCC_Relay = false;
           digitalWrite(PCC_Relay_Pin, PCC_Relay);
-          State = Optimize;
+          State = Resistance_Tracking;
         }
         break;
 
@@ -360,8 +360,8 @@ void PC_Comms () {
         Serial.println("StartUp");
         break;
 
-      case Optimize:
-        Serial.println("Optimize");
+      case Resistance_Tracking:
+        Serial.println("Resistance Tracking");
         break;
 
       case Regulate:
@@ -484,20 +484,20 @@ void PC_Comms () {
   }
 }
 
-void VIratio_optimize_load() {
+void Resistance_Track_Load() {
   VIratio = 1 / Effective_Load_Resistance;
   if (load_Resistance_Tracking_Enable) {
     if (L_Power > regulate_Power_Setpoint) {
-      DAC_Voltage_Previous = DAC_Voltage;                          //Check if power regulation is needed
-      DAC_Voltage = DAC_Voltage - DAC_Perturbation;          //Regulate power
+      DAC_Voltage_Previous = DAC_Voltage;                   //Check if power regulation is needed
+      DAC_Voltage = DAC_Voltage - DAC_Perturbation;         //Regulate power
     }
     else {
       if (L_Voltage > 5) {
-        if (L_Current - (VIratio * L_Voltage) < 0) {           //if the expression is negative, then load voltage is too high and current can be increased
+        if (L_Current - (VIratio * L_Voltage) < 0) {        //if the expression is negative, then load voltage is too high and current can be increased
           DAC_Voltage_Previous = DAC_Voltage;
           DAC_Voltage = DAC_Voltage + DAC_Perturbation;
         }
-        else if (L_Current - (VIratio * L_Voltage) > 0) {        //if the expression is positive, then load current is too high and must be reduced
+        else if (L_Current - (VIratio * L_Voltage) > 0) {   //if the expression is positive, then load current is too high and must be reduced
           DAC_Voltage_Previous = DAC_Voltage;
           DAC_Voltage = DAC_Voltage - DAC_Perturbation;
         }
@@ -515,34 +515,34 @@ void RPM_Interupt() {
   Timer_RPM_Timeout = millis();
   if (digitalRead(RPM_Pin) == HIGH) {
     if (FirstRead_RPM) {
-      Htime1 = TempStore_RPM;                                               //capture first rising edge time
+      Htime1 = TempStore_RPM;                               //capture first rising edge time
       FirstRead_RPM = false;
     }
     else {
-      Htime2 = TempStore_RPM;                                               //capture second rising edge time
+      Htime2 = TempStore_RPM;                               //capture second rising edge time
       FirstRead_RPM = true;
       //noInterrupts();
       detachInterrupt(digitalPinToInterrupt(RPM_Pin));
-      RPM_Raw = 15000000 / (Htime2 - Htime1);                               //calculate rpm from period
+      RPM_Raw = 15000000 / (Htime2 - Htime1);               //calculate rpm from period
       if (RPM_Raw < 6000) {
-        if (abs(RPM_Raw - RPM_Raw_Previous) < 600) {                        //compare new rpm to previous
-          if ( i < 9 ) {                                                    //cycle through array
+        if (abs(RPM_Raw - RPM_Raw_Previous) < 600) {        //compare new rpm to previous
+          if ( i < 9 ) {                                    //cycle through array
             i++;
           }
           else {
             i = 0;
           }
-          RPM_Raw_Previous = RPM_Raw;                                       //set comparative value
-          RPMSum = RPMSum - Saved_RPM [i];                                  //subtract oldest value from sum
-          Saved_RPM [i] = RPM_Raw;                                          //insert new value into array
-          RPMSum = RPMSum + RPM_Raw;                                        //add new value to sum
+          RPM_Raw_Previous = RPM_Raw;                       //set comparative value
+          RPMSum = RPMSum - Saved_RPM [i];                  //subtract oldest value from sum
+          Saved_RPM [i] = RPM_Raw;                          //insert new value into array
+          RPMSum = RPMSum + RPM_Raw;                        //add new value to sum
           RPM_Filtered = (RPMSum / 10);
-          F = 0;                                                            //reset number of fails
+          F = 0;                                            //reset number of fails
         }
         else {
-          F ++;                                                             //increment failed compared value
+          F ++;                                             //increment failed compared value
           if ( F > 5 ) {
-            RPM_Raw_Previous = RPM_Raw;                                     //reset the comparative value
+            RPM_Raw_Previous = RPM_Raw;                     //reset the comparative value
           }
         }
       }
