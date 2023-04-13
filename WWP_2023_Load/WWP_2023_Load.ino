@@ -94,6 +94,10 @@ bool PCC_Disconnected = false;                              //True if PCC discon
 bool PCC_Relay = false;                                     //If set true, PCC will supply power from load side to turbine side
 bool state_Machine_Enable = true;                           //Set to false if wanting to do manual testing
 
+//Data recording variables
+bool record_data = false;
+File dataFile;
+const int chipSelect = BUILTIN_SDCARD;
 
 void setup() {
   //Linear Actuator
@@ -116,6 +120,11 @@ void setup() {
   DAC_Voltage = DAC_Voltage_Cutin;                          //Set to low load for better cut-in
 
   initialize_Timers();                                      //Set all timers to current millis() value
+
+  //Setup SD Card
+  if (!SD.begin(chipSelect)) {
+    Serial.println("SD initialization failed");
+  }
 }
 
 void loop() {
@@ -140,6 +149,9 @@ void loop() {
     Resistance_Track_Load();                                //Find DAC voltage setpoint
     set_Load();                                             //Set DAC voltage
     PC_Comms ();                                            //Check serial monitor and print to serial monitor
+    if (record_data) {
+      record_data();
+    }
   }
 }
 
@@ -499,6 +511,10 @@ void PC_Comms () {
         Effective_Load_Resistance = Serial.parseFloat();
         break;
 
+      case 'd':
+        record_data = !record_data;
+        break;
+
       default:
         Serial.println("Command not recognized");
         break;
@@ -578,5 +594,70 @@ void RPM_Interupt() {
         }
       }
     }
+  }
+}
+
+void record_data() {
+  dataFile = SD.open("tunnelData.txt", FILE_WRITE);
+
+  if (dataFile) {
+    dataFile.print(state_Machine_Enable ? "Enabled," : "Disabled,");
+    switch (State)
+    {
+      case StartUp:
+        datafile.print("StartUp,");
+        break;
+
+      case Resistance_Tracking:
+        datafile.print("Resistance Tracking,");
+        break;
+
+      case Regulate:
+        datafile.print("Regulate,");
+        break;
+
+      case EStop_Safety:
+        datafile.print("EStop Safety,");
+        break;
+
+      case Discontinuity_Safety:
+        datafile.print("Discontinuity Safety,");
+        break;
+
+      case EStop_Safety_Restart:
+        datafile.print("EStop Safety Restart,");
+        break;
+
+      case Discontinuity_Safety_Restart:
+        datafile.print("Discontinuity Safety Restart,");
+        break;
+
+      default:
+        datafile.print("Error,");
+        break;
+    }
+    dataFile.print(PCC_Relay ? "On," : "Off,");
+    dataFile.print(E_Stop ? "On," : "Off,");
+    dataFile.print(digitalRead(PCC_Disconnect_Pin) ? "Low," : "High,");
+    dataFile.print(PCC_Disconnected ? "True," : "False,");
+    dataFile.print(theta);
+    dataFile.print("°,");
+    dataFile.print(actual_Theta);
+    dataFile.print("°,");
+    dataFile.print(load_Resistance_Tracking_Enable ? "Enabled," : "Disabled,");
+    dataFile.print(Effective_Load_Resistance);
+    dataFile.print(" Ω,");
+    dataFile.print(DAC_Voltage);
+    dataFile.print(" mV,");
+    dataFile.print(RPM_Filtered);
+    dataFile.print(",");
+    dataFile.print(L_Voltage);
+    dataFile.print(" mV,");
+    dataFile.print(L_Current);
+    dataFile.print(" mA,");
+    dataFile.print(L_Power);
+    dataFile.println(" mW,");
+
+    dataFile.close();
   }
 }
