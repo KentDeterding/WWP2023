@@ -150,7 +150,7 @@ void loop() {
     set_Load();                                             //Set DAC voltage
     PC_Comms ();                                            //Check serial monitor and print to serial monitor
     if (record_data) {
-      record_data();
+      recordData();
     }
   }
 }
@@ -597,7 +597,7 @@ void RPM_Interupt() {
   }
 }
 
-void record_data() {
+void recordData() {
   dataFile = SD.open("tunnelData.txt", FILE_WRITE);
 
   if (dataFile) {
@@ -605,35 +605,35 @@ void record_data() {
     switch (State)
     {
       case StartUp:
-        datafile.print("StartUp,");
+        dataFile.print("StartUp,");
         break;
 
       case Resistance_Tracking:
-        datafile.print("Resistance Tracking,");
+        dataFile.print("Resistance Tracking,");
         break;
 
       case Regulate:
-        datafile.print("Regulate,");
+        dataFile.print("Regulate,");
         break;
 
       case EStop_Safety:
-        datafile.print("EStop Safety,");
+        dataFile.print("EStop Safety,");
         break;
 
       case Discontinuity_Safety:
-        datafile.print("Discontinuity Safety,");
+        dataFile.print("Discontinuity Safety,");
         break;
 
       case EStop_Safety_Restart:
-        datafile.print("EStop Safety Restart,");
+        dataFile.print("EStop Safety Restart,");
         break;
 
       case Discontinuity_Safety_Restart:
-        datafile.print("Discontinuity Safety Restart,");
+        dataFile.print("Discontinuity Safety Restart,");
         break;
 
       default:
-        datafile.print("Error,");
+        dataFile.print("Error,");
         break;
     }
     dataFile.print(PCC_Relay ? "On," : "Off,");
